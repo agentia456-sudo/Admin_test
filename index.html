@@ -180,8 +180,9 @@
                                     </button>
                                 </div>
                             </div>
-                            <div class="grid grid-cols-2 gap-3">
-                                <div><label class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Level</label><select id="notes-level" class="clean-select w-full"><option value="L1">L1</option><option value="L2">L2</option><option value="L3">L3</option></select></div>
+                            <div class="grid grid-cols-3 gap-3">
+                                <div><label class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Level</label><select id="notes-level" onchange="updateNotesSemestre()" class="clean-select w-full"><option value="L1">L1</option><option value="L2">L2</option><option value="L3">L3</option></select></div>
+                                <div><label class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Semestre</label><select id="notes-semestre" class="clean-select w-full"><option value="S1">S1</option><option value="S2">S2</option></select></div>
                                 <div><label class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Group</label><select id="notes-group" class="clean-select w-full"><option value="G1">G1</option><option value="G2">G2</option><option value="G3">G3</option><option value="G4">G4</option></select></div>
                             </div>
                             <div id="notes-dropzone" class="dropzone border-2 border-dashed border-slate-200 dark:border-slate-700 rounded-xl p-6 text-center cursor-pointer relative">
@@ -320,7 +321,8 @@
     <script>
         const SUPABASE_URL      = 'https://mxemardtyidrhfsnxvad.supabase.co';
         const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im14ZW1hcmR0eWlkcmhmc254dmFkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI4NzkwMzQsImV4cCI6MjA4ODQ1NTAzNH0.u1eFWdodluIqZQ-_Cr5IzSNMNUE1H4GQU-oDYT4Z1oo';
-        const N8N_CERT_WEBHOOK  = 'https://n8n-mcda.onrender.com/webhook-test/certificat-signe';
+        const N8N_CERT_WEBHOOK         = 'https://n8n-mcda.onrender.com/webhook-test/certificat-signe';
+        const N8N_IMPORT_NOTES_WEBHOOK = 'https://n8n-mcda.onrender.com/webhook-test/note';
 
         const { createClient } = supabase;
         const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -674,44 +676,70 @@
             }
         }
 
+        // ==========================================
+        // SEMESTRE AUTO-UPDATE SELON LEVEL
+        // ==========================================
+        function updateNotesSemestre() {
+            const level = document.getElementById('notes-level').value;
+            const sel   = document.getElementById('notes-semestre');
+            const map   = { L1: ['S1','S2'], L2: ['S3','S4'], L3: ['S5','S6'] };
+            const opts  = map[level] || ['S1','S2'];
+            sel.innerHTML = opts.map(s => `<option value="${s}">${s}</option>`).join('');
+        }
+
         async function uploadNotesFile() {
             const file = document.getElementById('notes-file').files[0];
             if (!file) return;
             const { data: { session } } = await sb.auth.getSession();
             if (!session) { showToast('Session expired — please login again', 'error'); setTimeout(() => window.location.href = 'login.html', 1500); return; }
 
-            const level = document.getElementById('notes-level').value;
-            const group = document.getElementById('notes-group').value;
+            const level    = document.getElementById('notes-level').value;
+            const semestre = document.getElementById('notes-semestre').value;
+            const group    = document.getElementById('notes-group').value;
 
             const btn = document.getElementById('notes-btn');
             const pd  = document.getElementById('notes-progress');
             const fl  = document.getElementById('notes-fill');
             const pt  = document.getElementById('notes-progress-text');
-            btn.disabled = true; pd.style.display = 'block'; fl.style.width = '40%'; pt.textContent = 'Uploading...';
+            btn.disabled = true; pd.style.display = 'block'; fl.style.width = '20%'; pt.textContent = 'Reading file...';
 
-            const ext = file.name.split('.').pop();
-            // ← nom du fichier selon le type choisi
-            const fileName = currentNotesType === 'pv'
-                ? `${level}_pv.${ext}`       // ex: L3_pv.xlsx
-                : `${level}.${ext}`;         // ex: L3.xlsx (comportement original)
+            // Lire le fichier Excel et envoyer à n8n
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                try {
+                    fl.style.width = '50%'; pt.textContent = 'Sending to database...';
+                    const base64 = e.target.result.split(',')[1];
 
-            const { error } = await sb.storage.from('notes').upload(fileName, file, {
-                contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                upsert: true
-            });
+                    const res = await fetch(N8N_IMPORT_NOTES_WEBHOOK, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            file_base64: base64,
+                            level:       level,
+                            semestre:    semestre,
+                            group:       group,
+                            type:        currentNotesType   // 'detailed' ou 'pv'
+                        })
+                    });
 
-            if (error) {
-                fl.style.width = '100%'; pt.textContent = 'Error';
-                showToast(error.message, 'error'); btn.disabled = false;
-            } else {
-                fl.style.width = '100%'; pt.textContent = 'Completed!';
-                const label = currentNotesType === 'pv' ? 'PV Délibération' : 'Notes Détaillées';
-                showToast(`${label} — ${file.name} uploaded successfully ✅`, 'success');
-                setTimeout(() => resetUploadUI('notes'), 2000);
-            }
+                    if (!res.ok) throw new Error(`Server error: ${res.status}`);
+
+                    fl.style.width = '100%'; pt.textContent = 'Completed!';
+                    const label = currentNotesType === 'pv' ? 'PV Délibération' : 'Notes Détaillées';
+                    showToast(`${label} (${semestre}) — importé avec succès ✅`, 'success');
+                    setTimeout(() => resetUploadUI('notes'), 2500);
+                } catch (err) {
+                    fl.style.width = '100%'; pt.textContent = 'Error';
+                    showToast('Erreur import: ' + err.message, 'error');
+                    btn.disabled = false;
+                }
+            };
+            reader.onerror = () => { showToast('Erreur lecture fichier', 'error'); btn.disabled = false; pd.style.display = 'none'; };
+            reader.readAsDataURL(file);
         }
 
-        window.selectNotesType = selectNotesType;
+        window.selectNotesType     = selectNotesType;
+        window.updateNotesSemestre = updateNotesSemestre;
 
         window.deleteSectionFile = deleteSectionFile;
     </script>
